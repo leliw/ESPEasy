@@ -1,7 +1,10 @@
+#include "_Plugin_Helper.h"
 #ifdef USES_P031
 //#######################################################################################################
 //#################### Plugin 031: SHT10/SHT11/SHT15 Temp/Humidity Sensor ###############################
 //#######################################################################################################
+
+
 
 #define PLUGIN_031
 #define PLUGIN_ID_031         31
@@ -16,6 +19,10 @@
 #define P031_COMMAND_NO_ACK  4
 #define P031_NO_DATA         5
 
+// see https://github.com/letscontrolit/ESPEasy/issues/2444
+#define P031_DELAY_LONGER_CABLES  delayMicroseconds(_clockdelay);
+#define P031_MAX_CLOCK_DELAY  30   // delay of 10 usec is enough for a 30m CAT6 UTP cable.
+
 class P031_data_struct: public PluginTaskData_base
 {
 public:
@@ -28,9 +35,13 @@ public:
 
 	P031_data_struct() {}
 
-  byte init(byte data_pin, byte clock_pin, bool pullUp) {
+  byte init(byte data_pin, byte clock_pin, bool pullUp, byte clockdelay) {
     _dataPin = data_pin;
     _clockPin = clock_pin;
+    _clockdelay = clockdelay;
+    if (_clockdelay > P031_MAX_CLOCK_DELAY) {
+      _clockdelay = P031_MAX_CLOCK_DELAY;
+    }
     input_mode = pullUp ? INPUT_PULLUP : INPUT;
     state = P031_IDLE;
 
@@ -47,8 +58,8 @@ public:
         if (digitalRead(_dataPin) == LOW) {
           float tempRaw = readData(16);
           // Temperature conversion coefficients from SHT1X datasheet for version 4
-          const float d1 = -39.7;  // 3.5V
-          const float d2 = 0.01;   // 14-bit
+          const float d1 = -39.7f;  // 3.5V
+          const float d2 = 0.01f;   // 14-bit
           tempC = d1 + (tempRaw * d2);
           state = P031_WAIT_HUM; // Wait for humidity
           sendCommand(SHT1X_CMD_MEASURE_RH);
@@ -61,11 +72,11 @@ public:
           float raw = readData(16);
 
           // Temperature conversion coefficients from SHT1X datasheet for version 4
-          const float c1 = -2.0468;
-          const float c2 = 0.0367;
-          const float c3 = -1.5955E-6;
-          const float t1 = 0.01;
-          const float t2 = 0.00008;
+          const float c1 = -2.0468f;
+          const float c2 = 0.0367f;
+          const float c3 = -1.5955E-6f;
+          const float t1 = 0.01f;
+          const float t2 = 0.00008f;
 
           float rhLinear = c1 + c2 * raw + c3 * raw * raw;
           rhTrue = (tempC - 25) * (t1 + t2 * raw) + rhLinear;
@@ -134,21 +145,27 @@ public:
     // Transmission Start sequence
     digitalWrite(_dataPin, HIGH);
     digitalWrite(_clockPin, HIGH);
+    P031_DELAY_LONGER_CABLES
     digitalWrite(_dataPin, LOW);
     digitalWrite(_clockPin, LOW);
+    P031_DELAY_LONGER_CABLES
     digitalWrite(_clockPin, HIGH);
+    P031_DELAY_LONGER_CABLES
     digitalWrite(_dataPin, HIGH);
     digitalWrite(_clockPin, LOW);
+    P031_DELAY_LONGER_CABLES
 
     // Send the command (address must be 000b)
-    shiftOut(_dataPin, _clockPin, MSBFIRST, cmd);
+    p031_shiftOut(_dataPin, _clockPin, MSBFIRST, cmd);
 
     // Wait for ACK
     bool ackerror = false;
     digitalWrite(_clockPin, HIGH);
+    P031_DELAY_LONGER_CABLES
     pinMode(_dataPin, input_mode);
     if (digitalRead(_dataPin) != LOW) ackerror = true;
     digitalWrite(_clockPin, LOW);
+    P031_DELAY_LONGER_CABLES
 
     if (cmd == SHT1X_CMD_MEASURE_TEMP || cmd == SHT1X_CMD_MEASURE_RH) {
       delayMicroseconds(1); /* Give the sensor time to release the data line */
@@ -165,35 +182,75 @@ public:
 
     if (bits == 16) {
       // Read most significant byte
-      val = shiftIn(_dataPin, _clockPin, 8);
+      val = p031_shiftIn(_dataPin, _clockPin, MSBFIRST);
       val <<= 8;
 
       // Send ACK
       pinMode(_dataPin, OUTPUT);
       digitalWrite(_dataPin, LOW);
       digitalWrite(_clockPin, HIGH);
+      P031_DELAY_LONGER_CABLES
       digitalWrite(_clockPin, LOW);
+      P031_DELAY_LONGER_CABLES
       pinMode(_dataPin, input_mode);
     }
 
     // Read least significant byte
-    val |= shiftIn(_dataPin, _clockPin, 8);
+    val |= p031_shiftIn(_dataPin, _clockPin, MSBFIRST);
 
     // Keep DATA pin high to skip CRC
     digitalWrite(_clockPin, HIGH);
+    P031_DELAY_LONGER_CABLES
     digitalWrite(_clockPin, LOW);
+    P031_DELAY_LONGER_CABLES
 
     return val;
   }
 
-  float tempC = 0.0;
-  float rhTrue = 0.0;
-  unsigned long sendCommandTime;
+  uint8_t p031_shiftIn(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder) {
+  	uint8_t value = 0;
+  	uint8_t i;
 
-  int input_mode;
+  	for (i = 0; i < 8; ++i) {
+  		digitalWrite(clockPin, HIGH);
+      P031_DELAY_LONGER_CABLES
+  		if (bitOrder == LSBFIRST)
+  			value |= digitalRead(dataPin) << i;
+  		else
+  			value |= digitalRead(dataPin) << (7 - i);
+  		digitalWrite(clockPin, LOW);
+      P031_DELAY_LONGER_CABLES
+  	}
+  	return value;
+  }
+
+  void p031_shiftOut(uint8_t dataPin, uint8_t clockPin, uint8_t bitOrder, uint8_t val)
+  {
+  	uint8_t i;
+
+  	for (i = 0; i < 8; i++)  {
+  		if (bitOrder == LSBFIRST)
+  			digitalWrite(dataPin, !!(val & (1 << i)));
+  		else
+  			digitalWrite(dataPin, !!(val & (1 << (7 - i))));
+
+  		digitalWrite(clockPin, HIGH);
+      P031_DELAY_LONGER_CABLES
+  		digitalWrite(clockPin, LOW);
+      P031_DELAY_LONGER_CABLES
+  	}
+  }
+
+
+  float tempC = 0.0f;
+  float rhTrue = 0.0f;
+  unsigned long sendCommandTime = 0;
+
+  int input_mode = 0;
   byte _dataPin = 0;
   byte _clockPin = 0;
   byte state = P031_IDLE;
+  byte _clockdelay = 0;
 };
 
 
@@ -208,7 +265,7 @@ boolean Plugin_031(byte function, struct EventStruct *event, String& string)
       {
         Device[++deviceCount].Number = PLUGIN_ID_031;
         Device[deviceCount].Type = DEVICE_TYPE_DUAL;
-        Device[deviceCount].VType = SENSOR_TYPE_TEMP_HUM;
+        Device[deviceCount].VType = Sensor_VType::SENSOR_TYPE_TEMP_HUM;
         Device[deviceCount].Ports = 0;
         Device[deviceCount].PullUpOption = true;
         Device[deviceCount].InverseLogicOption = false;
@@ -240,24 +297,43 @@ boolean Plugin_031(byte function, struct EventStruct *event, String& string)
         break;
       }
 
+    case PLUGIN_WEBFORM_LOAD:
+    {
+      addFormNumericBox(F("Clock Delay"), F("p031_delay"), PCONFIG(0), 0, P031_MAX_CLOCK_DELAY);
+      addUnit(F("usec"));
+      addFormNote(F("Reduce clock/data frequency to allow for longer cables"));
+      success = true;
+      break;
+    }
+    case PLUGIN_WEBFORM_SAVE:
+      {
+        PCONFIG(0) = getFormItemInt(F("p031_delay"));
+        success = true;
+        break;
+      }
+
+
     case PLUGIN_INIT:
       {
-        initPluginTaskData(event->TaskIndex, new P031_data_struct());
+        initPluginTaskData(event->TaskIndex, new (std::nothrow) P031_data_struct());
         P031_data_struct *P031_data =
             static_cast<P031_data_struct *>(getPluginTaskData(event->TaskIndex));
         if (nullptr == P031_data) {
           return success;
         }
-        byte status = P031_data->init(CONFIG_PIN1, CONFIG_PIN2, Settings.TaskDevicePin1PullUp[event->TaskIndex]);
+        byte status = P031_data->init(
+          CONFIG_PIN1, CONFIG_PIN2,
+          Settings.TaskDevicePin1PullUp[event->TaskIndex],
+          PCONFIG(0));
         if (loglevelActiveFor(LOG_LEVEL_DEBUG)) {
           String log = F("SHT1X : Status byte: ");
           log += String(status, HEX);
           log += F(" - resolution: ");
-          log += (status & 1 ? F("low") : F("high"));
+          log += ((status & 1) ? F("low") : F("high"));
           log += F(" reload from OTP: ");
-          log += ((status >> 1) & 1 ? F("yes") : F("no"));
+          log += (((status >> 1) & 1) ? F("yes") : F("no"));
           log += F(", heater: ");
-          log += ((status >> 2) & 1 ? F("on") : F("off"));
+          log += (((status >> 2) & 1) ? F("on") : F("off"));
           addLog(LOG_LEVEL_DEBUG, log);
         }
         success = true;
@@ -271,7 +347,7 @@ boolean Plugin_031(byte function, struct EventStruct *event, String& string)
       if (nullptr != P031_data) {
         if (P031_data->process()) {
           // Measurement ready, schedule new read.
-          schedule_task_device_timer(event->TaskIndex, millis() + 10);
+          Scheduler.schedule_task_device_timer(event->TaskIndex, millis() + 10);
         }
       }
       success = true;
@@ -310,4 +386,6 @@ boolean Plugin_031(byte function, struct EventStruct *event, String& string)
   }
   return success;
 }
+
+
 #endif // USES_P031
